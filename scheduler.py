@@ -4,6 +4,7 @@ import sys
 import os
 import time
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -19,6 +20,8 @@ from notifications.telegram import (
     send_hourly_digest,
     send_daily_summary,
 )
+from pybit.unified_trading import HTTP
+from config.settings import API_KEY, API_SECRET, USE_TESTNET, USE_DEMO
 
 # Global session metrics
 _metrics = {
@@ -27,10 +30,37 @@ _metrics = {
     "daily_scans": 0,
     "daily_signals": 0,
     "start_equity": None,
-    "current_equity": "10000.00",
+    "current_equity": "1001.88",
     "slots_used": 0,
     "last_top_radar": None,
 }
+
+
+def get_live_account_state():
+    """Fetch live Bybit Demo balance and open slots."""
+    try:
+        client = HTTP(testnet=USE_TESTNET, demo=USE_DEMO, api_key=API_KEY, api_secret=API_SECRET)
+        wallet = client.get_wallet_balance(accountType="UNIFIED", coin="USDT")
+        accs = wallet.get("result", {}).get("list", [])
+        if accs:
+            for coin in accs[0].get("coin", []):
+                if coin.get("coin") == "USDT":
+                    eq = Decimal(coin.get("equity") or "0")
+                    _metrics["current_equity"] = f"{eq:.2f}"
+                    if _metrics["start_equity"] is None:
+                        _metrics["start_equity"] = _metrics["current_equity"]
+
+        # Fetch open positions count
+        pos = client.get_positions(category="linear", settleCoin="USDT", limit=50)
+        open_pos = sum(
+            Decimal(p.get("size") or "0") > 0
+            for p in pos.get("result", {}).get("list", [])
+        )
+        _metrics["slots_used"] = open_pos
+    except Exception as e:
+        logger.debug(f"Account state read: {e}")
+
+    return _metrics["current_equity"], _metrics["slots_used"]
 
 
 def next_scan_time(now: datetime) -> datetime:
@@ -78,6 +108,9 @@ def check_macro_market():
 def scan_once(last_alert_key=None):
     print("\n=== BYBIT DEMO SCANNER ===", flush=True)
 
+    # Sync live account balance from Bybit Demo
+    get_live_account_state()
+
     result = scan_market(max_pairs=50)
 
     _metrics["hourly_scans"] += 1
@@ -120,8 +153,6 @@ def scan_once(last_alert_key=None):
 
             _metrics["current_equity"] = risk.get("equity_usdt", _metrics["current_equity"])
             _metrics["slots_used"] = risk.get("slots_used", 0)
-            if _metrics["start_equity"] is None:
-                _metrics["start_equity"] = _metrics["current_equity"]
 
             # Send rich 15M Signal Alert
             send_signal_alert(candidate, risk)
@@ -143,6 +174,8 @@ def check_and_send_hourly(current_time: datetime, last_hourly_mark: datetime):
     """Trigger hourly digest at the top of each hour (XX:00)."""
     current_hour_mark = current_time.replace(minute=0, second=0, microsecond=0)
     if last_hourly_mark is None or current_hour_mark > last_hourly_mark:
+        # Update live equity and open slots
+        eq, slots = get_live_account_state()
         macro = check_macro_market()
         top_watch = "None"
         if _metrics["last_top_radar"]:
@@ -153,14 +186,13 @@ def check_and_send_hourly(current_time: datetime, last_hourly_mark: datetime):
             hour_utc=current_hour_mark.strftime("%Y-%m-%d %H:00"),
             scans_completed=_metrics["hourly_scans"],
             signals_count=_metrics["hourly_signals"],
-            slots_used=_metrics["slots_used"],
-            equity=_metrics["current_equity"],
+            slots_used=slots,
+            equity=eq,
             btc_summary=macro["btc"],
             eth_summary=macro["eth"],
             top_watch=top_watch,
         )
         print(f"[HOURLY DIGEST SENT] for {current_hour_mark.strftime('%H:00 UTC')}", flush=True)
-        # Reset hourly counters
         _metrics["hourly_scans"] = 0
         _metrics["hourly_signals"] = 0
         return current_hour_mark
@@ -172,9 +204,9 @@ def check_and_send_daily(current_time: datetime, last_daily_mark: datetime):
     current_day_mark = current_time.date()
     if last_daily_mark is None or current_day_mark > last_daily_mark:
         if last_daily_mark is not None:
-            # Send daily report for the completed day
-            start_val = float(_metrics["start_equity"] or 10000.0)
-            curr_val = float(_metrics["current_equity"] or 10000.0)
+            eq, _ = get_live_account_state()
+            start_val = float(_metrics["start_equity"] or eq)
+            curr_val = float(eq)
             pnl = curr_val - start_val
             pnl_pct = (pnl / start_val) * 100 if start_val > 0 else 0.0
 
@@ -203,6 +235,10 @@ def run_scheduler():
     print("=== 15M SCHEDULER STARTED ===")
     print("BYBIT DEMO - REAL-TIME SIGNALS & TELEGRAM ALERTS")
     print("Press CTRL+C to stop")
+
+    # Initial account balance sync
+    get_live_account_state()
+    print(f"Bybit Demo Initial Balance Synced: ${_metrics['current_equity']} USDT", flush=True)
 
     last_boundary = None
     last_alert_key = None
