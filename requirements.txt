@@ -1,4 +1,6 @@
-﻿pybit==5.7.0
+pybit==5.7.0
+pycryptodome>=3.20.0
+requests>=2.31.0
 pandas>=2.0.0
 numpy>=1.24.0
 ta>=0.11.0
