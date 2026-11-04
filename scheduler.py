@@ -9,6 +9,7 @@ from decimal import Decimal
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from utils.logger import logger
+from utils import watchdog
 from analysis.scanner import scan_market
 from analysis.structure import analyze_market_structure
 from data.market_data import get_ohlcv
@@ -41,6 +42,13 @@ def get_live_account_state():
     try:
         client = HTTP(testnet=USE_TESTNET, demo=USE_DEMO, api_key=API_KEY, api_secret=API_SECRET)
         wallet = client.get_wallet_balance(accountType="UNIFIED", coin="USDT")
+
+        if wallet.get("retCode") != 0:
+            raise RuntimeError(
+                wallet.get("retMsg")
+                or "Bybit wallet request failed"
+            )
+
         accs = wallet.get("result", {}).get("list", [])
         if accs:
             for coin in accs[0].get("coin", []):
@@ -50,14 +58,14 @@ def get_live_account_state():
                     if _metrics["start_equity"] is None:
                         _metrics["start_equity"] = _metrics["current_equity"]
 
-        # Fetch open positions count
-        pos = client.get_positions(category="linear", settleCoin="USDT", limit=50)
-        open_pos = sum(
-            Decimal(p.get("size") or "0") > 0
-            for p in pos.get("result", {}).get("list", [])
-        )
-        _metrics["slots_used"] = open_pos
+        invariants = watchdog.validate_account_invariants(client)
+
+        if "open_positions" in invariants:
+            _metrics["slots_used"] = invariants[
+                "open_positions"
+            ]
     except Exception as e:
+        watchdog.record_api_failure()
         logger.debug(f"Account state read: {e}")
 
     return _metrics["current_equity"], _metrics["slots_used"]
@@ -112,6 +120,7 @@ def scan_once(last_alert_key=None):
     get_live_account_state()
 
     result = scan_market(max_pairs=50)
+    watchdog.record_scan_success()
 
     _metrics["hourly_scans"] += 1
     _metrics["daily_scans"] += 1
@@ -172,6 +181,7 @@ def scan_once(last_alert_key=None):
 
 def check_and_send_hourly(current_time: datetime, last_hourly_mark: datetime):
     """Trigger hourly digest at the top of each hour (XX:00)."""
+    watchdog.check_watchdog_health()
     current_hour_mark = current_time.replace(minute=0, second=0, microsecond=0)
     if last_hourly_mark is None or current_hour_mark > last_hourly_mark:
         # Update live equity and open slots
@@ -246,6 +256,7 @@ def run_scheduler():
     last_daily_mark = datetime.now(timezone.utc).date()
 
     while True:
+        watchdog.check_watchdog_health()
         now = datetime.now(timezone.utc)
         target = next_scan_time(now)
 
@@ -254,6 +265,8 @@ def run_scheduler():
         remaining = (target - datetime.now(timezone.utc)).total_seconds()
         if remaining > 0:
             time.sleep(remaining)
+
+        watchdog.check_watchdog_health()
 
         boundary = target - timedelta(seconds=10)
         if boundary == last_boundary:
