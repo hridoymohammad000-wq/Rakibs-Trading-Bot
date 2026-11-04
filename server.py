@@ -1,4 +1,4 @@
-﻿"""Render entrypoint: Fast HTTP binding with background scheduler and non-blocking /scan trigger."""
+﻿"""Render entrypoint: Fast HTTP binding with background scheduler and non-blocking scan trigger."""
 import os
 import sys
 import threading
@@ -22,10 +22,17 @@ def trigger_background_scan():
             return
         try:
             print("[SCAN TRIGGER] Starting market scan cycle...", flush=True)
-            from scheduler import scan_once
+            from scheduler import scan_once, check_and_send_hourly, check_and_send_daily
+            from datetime import datetime, timezone
+            
             scan_once()
             _last_scan_time = time.time()
-            print("[SCAN TRIGGER] Market scan completed and alert delivered!", flush=True)
+            
+            # Check hourly and daily digests
+            now = datetime.now(timezone.utc)
+            check_and_send_hourly(now)
+            check_and_send_daily(now)
+            print("[SCAN TRIGGER] Market scan completed and alerts evaluated!", flush=True)
         except Exception as e:
             print(f"[SCAN TRIGGER ERROR]: {e}", flush=True)
             traceback.print_exc()
@@ -40,22 +47,17 @@ class HealthHandler(BaseHTTPRequestHandler):
         global _last_scan_time
         path = self.path.split("?")[0].rstrip("/")
 
-        if path in ("/scan", "/trigger"):
+        # Trigger scan on /scan, /trigger, OR on root "/" if > 4 minutes have elapsed
+        scan_started = False
+        if path in ("/scan", "/trigger") or (time.time() - _last_scan_time > 240):
             trigger_background_scan()
-            self.send_response(200)
-            self.send_header("Content-type", "application/json")
-            self.end_headers()
-            self.wfile.write(b'{"status": "scan_triggered", "message": "Market scan initiated in background, Telegram alert incoming"}')
-            return
-
-        # Auto-trigger scan if > 14 minutes since last scan
-        if time.time() - _last_scan_time > 840:
-            trigger_background_scan()
+            scan_started = True
 
         self.send_response(200)
         self.send_header("Content-type", "application/json")
         self.end_headers()
-        self.wfile.write(b'{"status": "healthy", "service": "Rakibs Trading Bot"}')
+        res = b'{"status": "healthy", "service": "Rakibs Trading Bot", "scan_triggered": true}' if scan_started else b'{"status": "healthy", "service": "Rakibs Trading Bot"}'
+        self.wfile.write(res)
 
     def log_message(self, format, *args):
         pass

@@ -36,19 +36,15 @@ _metrics = {
     "last_top_radar": None,
 }
 
+_last_hourly_mark = None
+_last_daily_mark = datetime.now(timezone.utc).date()
+
 
 def get_live_account_state():
     """Fetch live Bybit Demo balance and open slots."""
     try:
         client = HTTP(testnet=USE_TESTNET, demo=USE_DEMO, api_key=API_KEY, api_secret=API_SECRET)
         wallet = client.get_wallet_balance(accountType="UNIFIED", coin="USDT")
-
-        if wallet.get("retCode") != 0:
-            raise RuntimeError(
-                wallet.get("retMsg")
-                or "Bybit wallet request failed"
-            )
-
         accs = wallet.get("result", {}).get("list", [])
         if accs:
             for coin in accs[0].get("coin", []):
@@ -58,14 +54,15 @@ def get_live_account_state():
                     if _metrics["start_equity"] is None:
                         _metrics["start_equity"] = _metrics["current_equity"]
 
-        invariants = watchdog.validate_account_invariants(client)
-
-        if "open_positions" in invariants:
-            _metrics["slots_used"] = invariants[
-                "open_positions"
-            ]
+        # Fetch open positions count
+        pos = client.get_positions(category="linear", settleCoin="USDT", limit=50)
+        open_pos = sum(
+            Decimal(p.get("size") or "0") > 0
+            for p in pos.get("result", {}).get("list", [])
+        )
+        _metrics["slots_used"] = open_pos
+        watchdog.validate_account_invariants(client, positions_response=pos)
     except Exception as e:
-        watchdog.record_api_failure()
         logger.debug(f"Account state read: {e}")
 
     return _metrics["current_equity"], _metrics["slots_used"]
@@ -176,15 +173,24 @@ def scan_once(last_alert_key=None):
         print("NO QUALIFIED SIGNAL -> Sending 15M Scan Ping", flush=True)
         send_scan_ping(scanned_count=result["scanned_pairs"], top_radar=top_report)
 
+    # Check hourly & daily digests seamlessly
+    now = datetime.now(timezone.utc)
+    check_and_send_hourly(now)
+    check_and_send_daily(now)
+
     return last_alert_key
 
 
-def check_and_send_hourly(current_time: datetime, last_hourly_mark: datetime):
+def check_and_send_hourly(current_time: datetime = None, last_hourly_mark: datetime = None):
     """Trigger hourly digest at the top of each hour (XX:00)."""
+    global _last_hourly_mark
+    if current_time is None:
+        current_time = datetime.now(timezone.utc)
+    mark_to_check = last_hourly_mark if last_hourly_mark is not None else _last_hourly_mark
+
     watchdog.check_watchdog_health()
     current_hour_mark = current_time.replace(minute=0, second=0, microsecond=0)
-    if last_hourly_mark is None or current_hour_mark > last_hourly_mark:
-        # Update live equity and open slots
+    if mark_to_check is None or current_hour_mark > mark_to_check:
         eq, slots = get_live_account_state()
         macro = check_macro_market()
         top_watch = "None"
@@ -205,15 +211,21 @@ def check_and_send_hourly(current_time: datetime, last_hourly_mark: datetime):
         print(f"[HOURLY DIGEST SENT] for {current_hour_mark.strftime('%H:00 UTC')}", flush=True)
         _metrics["hourly_scans"] = 0
         _metrics["hourly_signals"] = 0
+        _last_hourly_mark = current_hour_mark
         return current_hour_mark
-    return last_hourly_mark
+    return mark_to_check
 
 
-def check_and_send_daily(current_time: datetime, last_daily_mark: datetime):
+def check_and_send_daily(current_time: datetime = None, last_daily_mark = None):
     """Trigger daily summary at UTC 00:00."""
+    global _last_daily_mark
+    if current_time is None:
+        current_time = datetime.now(timezone.utc)
+    mark_to_check = last_daily_mark if last_daily_mark is not None else _last_daily_mark
+
     current_day_mark = current_time.date()
-    if last_daily_mark is None or current_day_mark > last_daily_mark:
-        if last_daily_mark is not None:
+    if mark_to_check is None or current_day_mark > mark_to_check:
+        if mark_to_check is not None:
             eq, _ = get_live_account_state()
             start_val = float(_metrics["start_equity"] or eq)
             curr_val = float(eq)
@@ -224,7 +236,7 @@ def check_and_send_daily(current_time: datetime, last_daily_mark: datetime):
             pct_str = f"+{pnl_pct:.2f}" if pnl_pct >= 0 else f"{pnl_pct:.2f}"
 
             send_daily_summary(
-                date_str=str(last_daily_mark),
+                date_str=str(mark_to_check),
                 start_equity=f"{start_val:.2f}",
                 current_equity=f"{curr_val:.2f}",
                 pnl_usdt=pnl_str,
@@ -232,13 +244,14 @@ def check_and_send_daily(current_time: datetime, last_daily_mark: datetime):
                 total_cycles=_metrics["daily_scans"],
                 signals_generated=_metrics["daily_signals"],
             )
-            print(f"[DAILY SUMMARY SENT] for {last_daily_mark}", flush=True)
+            print(f"[DAILY SUMMARY SENT] for {mark_to_check}", flush=True)
 
         _metrics["daily_scans"] = 0
         _metrics["daily_signals"] = 0
         _metrics["start_equity"] = _metrics["current_equity"]
+        _last_daily_mark = current_day_mark
         return current_day_mark
-    return last_daily_mark
+    return mark_to_check
 
 
 def run_scheduler():
@@ -246,17 +259,13 @@ def run_scheduler():
     print("BYBIT DEMO - REAL-TIME SIGNALS & TELEGRAM ALERTS")
     print("Press CTRL+C to stop")
 
-    # Initial account balance sync
     get_live_account_state()
     print(f"Bybit Demo Initial Balance Synced: ${_metrics['current_equity']} USDT", flush=True)
 
     last_boundary = None
     last_alert_key = None
-    last_hourly_mark = None
-    last_daily_mark = datetime.now(timezone.utc).date()
 
     while True:
-        watchdog.check_watchdog_health()
         now = datetime.now(timezone.utc)
         target = next_scan_time(now)
 
@@ -265,8 +274,6 @@ def run_scheduler():
         remaining = (target - datetime.now(timezone.utc)).total_seconds()
         if remaining > 0:
             time.sleep(remaining)
-
-        watchdog.check_watchdog_health()
 
         boundary = target - timedelta(seconds=10)
         if boundary == last_boundary:
@@ -279,14 +286,6 @@ def run_scheduler():
             last_alert_key = scan_once(last_alert_key)
         except Exception as error:
             print(f"[ERROR] Scan: {type(error).__name__} - {error}", flush=True)
-
-        # Check Hourly Digest
-        now_after = datetime.now(timezone.utc)
-        if now_after.minute < 15:
-            last_hourly_mark = check_and_send_hourly(now_after, last_hourly_mark)
-
-        # Check Daily Summary
-        last_daily_mark = check_and_send_daily(now_after, last_daily_mark)
 
 
 if __name__ == "__main__":
