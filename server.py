@@ -1,4 +1,4 @@
-﻿"""Render entrypoint: Keeps HTTP connection active during scan so Render never freezes."""
+"""Render entrypoint: Keeps HTTP connection active during scan so Render never freezes."""
 import os
 import sys
 import threading
@@ -50,8 +50,29 @@ class HealthHandler(BaseHTTPRequestHandler):
                 self.wfile.write(f'{{"status": "completed", "duration_seconds": {duration}}}'.encode("utf-8"))
                 return
             except Exception as e:
-                print(f"[SCAN ERROR]: {e}", flush=True)
-                traceback.print_exc()
+                err_tb = traceback.format_exc()
+                print(f"[SCAN ERROR]: {err_tb}", flush=True)
+                self.send_response(500)
+                self.send_header("Content-type", "application/json")
+                self.end_headers()
+                import json
+                self.wfile.write(json.dumps({"status": "error", "error": str(e), "trace": err_tb}).encode("utf-8"))
+                return
+
+        # Diagnostics endpoint
+        if path == "/status":
+            self.send_response(200)
+            self.send_header("Content-type", "application/json")
+            self.end_headers()
+            import json
+            diag = {
+                "status": "online",
+                "last_scan_time": _last_scan_time,
+                "seconds_since_last_scan": round(time.time() - _last_scan_time, 1) if _last_scan_time else None,
+                "utc_time": datetime.now(timezone.utc).isoformat(),
+            }
+            self.wfile.write(json.dumps(diag).encode("utf-8"))
+            return
 
         # Regular fast health check for intermediate pings
         self.send_response(200)
