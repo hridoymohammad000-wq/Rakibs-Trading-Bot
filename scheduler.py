@@ -61,7 +61,7 @@ def get_live_account_state():
             for p in pos.get("result", {}).get("list", [])
         )
         _metrics["slots_used"] = open_pos
-        watchdog.validate_account_invariants(client, positions_response=pos)
+        watchdog.validate_account_invariants(client)
     except Exception as e:
         logger.debug(f"Account state read: {e}")
 
@@ -300,3 +300,4 @@ if __name__ == "__main__":
             run_scheduler()
         except KeyboardInterrupt:
             print("\nSCHEDULER STOPPED")
+

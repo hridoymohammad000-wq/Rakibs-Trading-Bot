@@ -1,9 +1,10 @@
-﻿"""Render entrypoint: Fast HTTP binding with background scheduler and non-blocking scan trigger."""
+﻿"""Render entrypoint: Keeps HTTP connection active during scan so Render never freezes."""
 import os
 import sys
 import threading
 import time
 import traceback
+from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -14,32 +15,24 @@ _last_scan_time = 0
 _scan_lock = threading.Lock()
 
 
-def trigger_background_scan():
-    def _run():
-        global _last_scan_time
-        if not _scan_lock.acquire(blocking=False):
-            print("[SCAN TRIGGER] Scan already in progress, skipping duplicate trigger", flush=True)
-            return
-        try:
-            print("[SCAN TRIGGER] Starting market scan cycle...", flush=True)
-            from scheduler import scan_once, check_and_send_hourly, check_and_send_daily
-            from datetime import datetime, timezone
-            
-            scan_once()
-            _last_scan_time = time.time()
-            
-            # Check hourly and daily digests
-            now = datetime.now(timezone.utc)
-            check_and_send_hourly(now)
-            check_and_send_daily(now)
-            print("[SCAN TRIGGER] Market scan completed and alerts evaluated!", flush=True)
-        except Exception as e:
-            print(f"[SCAN TRIGGER ERROR]: {e}", flush=True)
-            traceback.print_exc()
-        finally:
-            _scan_lock.release()
-
-    threading.Thread(target=_run, daemon=True).start()
+def run_full_scan_sync():
+    """Run full scan while keeping HTTP connection active."""
+    global _last_scan_time
+    with _scan_lock:
+        print("[HTTP REQUEST] Running market scan cycle synchronously to keep container awake...", flush=True)
+        from scheduler import scan_once, check_and_send_hourly, check_and_send_daily
+        
+        t0 = time.time()
+        scan_once()
+        _last_scan_time = time.time()
+        
+        now = datetime.now(timezone.utc)
+        check_and_send_hourly(now)
+        check_and_send_daily(now)
+        
+        duration = round(time.time() - t0, 2)
+        print(f"[HTTP REQUEST] Scan and alerts completed in {duration}s!", flush=True)
+        return duration
 
 
 class HealthHandler(BaseHTTPRequestHandler):
@@ -47,17 +40,24 @@ class HealthHandler(BaseHTTPRequestHandler):
         global _last_scan_time
         path = self.path.split("?")[0].rstrip("/")
 
-        # Trigger scan on /scan, /trigger, OR on root "/" if > 4 minutes have elapsed
-        scan_started = False
-        if path in ("/scan", "/trigger") or (time.time() - _last_scan_time > 240):
-            trigger_background_scan()
-            scan_started = True
+        # Run scan if explicitly requested via /scan or if > 8 minutes since last scan
+        if path in ("/scan", "/trigger") or (time.time() - _last_scan_time > 480):
+            try:
+                duration = run_full_scan_sync()
+                self.send_response(200)
+                self.send_header("Content-type", "application/json")
+                self.end_headers()
+                self.wfile.write(f'{{"status": "completed", "duration_seconds": {duration}}}'.encode("utf-8"))
+                return
+            except Exception as e:
+                print(f"[SCAN ERROR]: {e}", flush=True)
+                traceback.print_exc()
 
+        # Regular fast health check for intermediate pings
         self.send_response(200)
         self.send_header("Content-type", "application/json")
         self.end_headers()
-        res = b'{"status": "healthy", "service": "Rakibs Trading Bot", "scan_triggered": true}' if scan_started else b'{"status": "healthy", "service": "Rakibs Trading Bot"}'
-        self.wfile.write(res)
+        self.wfile.write(b'{"status": "healthy", "service": "Rakibs Trading Bot"}')
 
     def log_message(self, format, *args):
         pass
