@@ -148,9 +148,6 @@ def check_trade_risk(candidate):
     if candidate.get("signal") not in ("BUY", "SELL"):
         return _reject("NO_VALID_SIGNAL")
 
-    if candidate.get("score", 0) < 8:
-        return _reject("LOW_SCORE")
-
     try:
         entry = _decimal(candidate["entry"])
         stop = _decimal(candidate["stop_loss"])

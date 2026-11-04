@@ -423,12 +423,16 @@ def _scan_symbol(
             and rr >= 2
         )
 
+        # Each strategy owns its setup requirements.  The shared
+        # evidence score is useful for comparison and reporting, but
+        # it must not make one strategy depend on another strategy's
+        # signals (for example, requiring an ICT liquidity grab for a
+        # valid pullback setup).
         candidate = bool(
             matched
             and relevant_regime
             and volatility_ok
             and valid_rr
-            and score >= min_score
         )
 
         rows.append({
@@ -561,16 +565,49 @@ def scan_market(
         if row["candidate"]
     ]
 
-    best_by_pair = {}
+    # Give every independently qualified strategy a route to the
+    # scheduler instead of letting the shared evidence score crowd a
+    # strategy out of the three dispatch slots.  Candidates are already
+    # score-ranked, so this selects the strongest row for each strategy.
+    top_candidates = []
+    selected_strategies = set()
+    selected_candidates = set()
 
     for row in candidates:
-        best_by_pair.setdefault(
-            row["symbol"], row
-        )
+        strategy = row["strategy"]
 
-    top_candidates = list(
-        best_by_pair.values()
-    )[:3]
+        if strategy in selected_strategies:
+            continue
+
+        top_candidates.append(row)
+        selected_strategies.add(strategy)
+        selected_candidates.add((row["symbol"], strategy))
+
+        if len(top_candidates) == 3:
+            break
+
+    # If fewer than three strategies qualified, fill the remaining
+    # slots with the next highest-ranked candidates from other symbols.
+    selected_symbols = {
+        row["symbol"] for row in top_candidates
+    }
+
+    for row in candidates:
+        if len(top_candidates) == 3:
+            break
+
+        if (
+            (row["symbol"], row["strategy"])
+            in selected_candidates
+            or row["symbol"] in selected_symbols
+        ):
+            continue
+
+        top_candidates.append(row)
+        selected_candidates.add(
+            (row["symbol"], row["strategy"])
+        )
+        selected_symbols.add(row["symbol"])
 
     return {
         "mode": "READ_ONLY",
