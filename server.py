@@ -13,7 +13,8 @@ if ROOT_DIR not in sys.path:
 
 from scheduler import SCAN_LOCK, scan_once, check_and_send_hourly, check_and_send_daily
 
-_last_scan_time = 0
+# Initialize to current time so initial Render startup health check returns instantly (<10ms)
+_last_scan_time = time.time()
 
 
 def run_full_scan_sync():
@@ -39,6 +40,29 @@ class HealthHandler(BaseHTTPRequestHandler):
         global _last_scan_time
         path = self.path.split("?")[0].rstrip("/")
 
+        # Fast health check for Render internal port checks
+        if path == "/health":
+            self.send_response(200)
+            self.send_header("Content-type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"status": "healthy", "service": "Rakibs Trading Bot"}')
+            return
+
+        # Diagnostics endpoint
+        if path == "/status":
+            self.send_response(200)
+            self.send_header("Content-type", "application/json")
+            self.end_headers()
+            import json
+            diag = {
+                "status": "online",
+                "last_scan_time": _last_scan_time,
+                "seconds_since_last_scan": round(time.time() - _last_scan_time, 1) if _last_scan_time else None,
+                "utc_time": datetime.now(timezone.utc).isoformat(),
+            }
+            self.wfile.write(json.dumps(diag).encode("utf-8"))
+            return
+
         # Run scan if explicitly requested via /scan or if > 8 minutes since last scan
         if path in ("/scan", "/trigger") or (time.time() - _last_scan_time > 480):
             try:
@@ -57,21 +81,6 @@ class HealthHandler(BaseHTTPRequestHandler):
                 import json
                 self.wfile.write(json.dumps({"status": "error", "error": str(e), "trace": err_tb}).encode("utf-8"))
                 return
-
-        # Diagnostics endpoint
-        if path == "/status":
-            self.send_response(200)
-            self.send_header("Content-type", "application/json")
-            self.end_headers()
-            import json
-            diag = {
-                "status": "online",
-                "last_scan_time": _last_scan_time,
-                "seconds_since_last_scan": round(time.time() - _last_scan_time, 1) if _last_scan_time else None,
-                "utc_time": datetime.now(timezone.utc).isoformat(),
-            }
-            self.wfile.write(json.dumps(diag).encode("utf-8"))
-            return
 
         # Regular fast health check for intermediate pings
         self.send_response(200)
