@@ -63,26 +63,21 @@ class HealthHandler(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps(diag).encode("utf-8"))
             return
 
-        # Run scan if explicitly requested via /scan or if > 8 minutes since last scan
-        if path in ("/scan", "/trigger") or (time.time() - _last_scan_time > 480):
-            try:
-                duration = run_full_scan_sync()
-                self.send_response(200)
-                self.send_header("Content-type", "application/json")
-                self.end_headers()
-                self.wfile.write(f'{{"status": "completed", "duration_seconds": {duration}}}'.encode("utf-8"))
-                return
-            except Exception as e:
-                err_tb = traceback.format_exc()
-                print(f"[SCAN ERROR]: {err_tb}", flush=True)
-                self.send_response(500)
-                self.send_header("Content-type", "application/json")
-                self.end_headers()
-                import json
-                self.wfile.write(json.dumps({"status": "error", "error": str(e), "trace": err_tb}).encode("utf-8"))
-                return
+        # Trigger scan immediately in background without blocking HTTP connection
+        if path in ("/scan", "/trigger"):
+            if not SCAN_LOCK.locked():
+                threading.Thread(target=scan_once, daemon=True).start()
+                msg = "Scan started in background"
+            else:
+                msg = "Scan already in progress"
+            self.send_response(200)
+            self.send_header("Content-type", "application/json")
+            self.end_headers()
+            import json
+            self.wfile.write(json.dumps({"status": "ok", "message": msg}).encode("utf-8"))
+            return
 
-        # Regular fast health check for intermediate pings
+        # Regular fast health check for cron-job.org and keep-alive probes
         self.send_response(200)
         self.send_header("Content-type", "application/json")
         self.end_headers()
