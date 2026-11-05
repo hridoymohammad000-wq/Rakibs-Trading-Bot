@@ -1,4 +1,4 @@
-﻿"""Run the scanner after each 15M UTC candle close, plus Hourly and Daily Telegram Digests."""
+"""Run the scanner after each 15M UTC candle close, plus Hourly and Daily Telegram Digests."""
 import argparse
 import sys
 import os
@@ -10,6 +10,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from utils.logger import logger
 from utils import watchdog
+from utils.radar_tracker import analyze_bottlenecks, record_radar_snapshot
+from utils import strategy_tracker
 from analysis.scanner import scan_market
 from analysis.structure import analyze_market_structure
 from data.market_data import get_ohlcv
@@ -131,11 +133,18 @@ def scan_once(last_alert_key=None):
         print("[BLOCK] Scanner errors detected", flush=True)
         return last_alert_key
 
-    # Track highest score report for radar
+    # Track highest score report for radar and analyze 5-8 bottlenecks
     top_report = None
+    radar_analysis = None
     if result.get("reports"):
         top_report = max(result["reports"], key=lambda r: r.get("score", 0))
         _metrics["last_top_radar"] = top_report
+        try:
+            radar_analysis = analyze_bottlenecks(result["reports"])
+            record_radar_snapshot(radar_analysis)
+            _metrics["last_radar_analysis"] = radar_analysis
+        except Exception as e:
+            logger.debug(f"Radar analysis error: {e}")
 
     # If qualified candidates found:
     signal_sent = False
@@ -162,6 +171,7 @@ def scan_once(last_alert_key=None):
 
             # Send rich 15M Signal Alert
             send_signal_alert(candidate, risk)
+            strategy_tracker.record_signal(candidate.get("strategy", ""), candidate.get("symbol", ""))
             _metrics["hourly_signals"] += 1
             _metrics["daily_signals"] += 1
             signal_sent = True
@@ -171,7 +181,11 @@ def scan_once(last_alert_key=None):
     # If no signal qualified, send quiet 15M ping
     if not signal_sent:
         print("NO QUALIFIED SIGNAL -> Sending 15M Scan Ping", flush=True)
-        send_scan_ping(scanned_count=result["scanned_pairs"], top_radar=top_report)
+        send_scan_ping(
+            scanned_count=result["scanned_pairs"],
+            top_radar=top_report,
+            radar_analysis=radar_analysis,
+        )
 
     # Check hourly & daily digests seamlessly
     now = datetime.now(timezone.utc)
@@ -198,6 +212,16 @@ def check_and_send_hourly(current_time: datetime = None, last_hourly_mark: datet
             r = _metrics["last_top_radar"]
             top_watch = f"#{r['symbol']} ({r['strategy'].upper()} - Score {r['score']}/13)"
 
+        scorecard_html = strategy_tracker.format_telegram_scorecard()
+        bottlenecks_html = ""
+        if _metrics.get("last_radar_analysis"):
+            ra = _metrics["last_radar_analysis"]
+            if ra.get("bottlenecks"):
+                b_lines = ["🚧 <b>Pipeline Bottlenecks (কোথায় আটকাচ্ছে):</b>"]
+                for b in ra["bottlenecks"][:3]:
+                    b_lines.append(f"• <b>{b['pct']}%</b> কয়েন: {b['label']}")
+                bottlenecks_html = "\n".join(b_lines)
+
         send_hourly_digest(
             hour_utc=current_hour_mark.strftime("%Y-%m-%d %H:00"),
             scans_completed=_metrics["hourly_scans"],
@@ -207,6 +231,8 @@ def check_and_send_hourly(current_time: datetime = None, last_hourly_mark: datet
             btc_summary=macro["btc"],
             eth_summary=macro["eth"],
             top_watch=top_watch,
+            scorecard_html=scorecard_html,
+            bottlenecks_html=bottlenecks_html,
         )
         print(f"[HOURLY DIGEST SENT] for {current_hour_mark.strftime('%H:00 UTC')}", flush=True)
         _metrics["hourly_scans"] = 0
@@ -235,6 +261,8 @@ def check_and_send_daily(current_time: datetime = None, last_daily_mark = None):
             pnl_str = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
             pct_str = f"+{pnl_pct:.2f}" if pnl_pct >= 0 else f"{pnl_pct:.2f}"
 
+            scorecard_html = strategy_tracker.format_telegram_scorecard()
+
             send_daily_summary(
                 date_str=str(mark_to_check),
                 start_equity=f"{start_val:.2f}",
@@ -243,6 +271,7 @@ def check_and_send_daily(current_time: datetime = None, last_daily_mark = None):
                 pnl_pct=pct_str,
                 total_cycles=_metrics["daily_scans"],
                 signals_generated=_metrics["daily_signals"],
+                scorecard_html=scorecard_html,
             )
             print(f"[DAILY SUMMARY SENT] for {mark_to_check}", flush=True)
 

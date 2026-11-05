@@ -1,4 +1,4 @@
-﻿# Environment & Secret Keys
+# Environment & Secret Keys
 .env
 *.env
 .env.*
@@ -17,6 +17,9 @@ ENV/
 # Logs
 logs/
 *.log
+
+# Runtime data
+data/*.json
 
 # Editor & OS
 .vscode/

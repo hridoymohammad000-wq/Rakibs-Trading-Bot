@@ -1,4 +1,4 @@
-﻿"""Telegram notifications for 15M signals, hourly digests, and daily summaries."""
+"""Telegram notifications for 15M signals, hourly digests, and daily summaries."""
 import asyncio
 import aiohttp
 import html
@@ -93,19 +93,30 @@ def send_signal_alert(candidate: dict, risk: dict) -> bool:
     return send_alert(msg, parse_mode="HTML")
 
 
-def send_scan_ping(scanned_count: int, top_radar: dict = None) -> bool:
-    """Send short 15M scan heartbeat summary."""
+def send_scan_ping(scanned_count: int, top_radar: dict = None, radar_analysis: dict = None) -> bool:
+    """Send short 15M scan heartbeat summary with pipeline and bottleneck info."""
     top_str = "None"
+    pipeline_str = ""
+    bottleneck_str = ""
+
     if top_radar:
         sym = top_radar.get("symbol", "")
         sc = top_radar.get("score", 0)
-        strat = top_radar.get("strategy", "")
-        top_str = f"#{sym} (Score: {sc}/13 - {strat})"
+        strat = top_radar.get("strategy", "").upper()
+        reason = top_radar.get("reason", "")
+        top_str = f"#{sym} ({sc}/13 - {strat})"
+
+    if radar_analysis:
+        nm_cnt = radar_analysis.get("total_near_miss", 0)
+        pipeline_str = f"\n• <b>Near-Miss Pipeline (5-8):</b> {nm_cnt} setups"
+        primary_b = radar_analysis.get("primary_bottleneck", "None")
+        if primary_b != "None":
+            bottleneck_str = f"\n• <b>Main Bottleneck:</b> {html.escape(primary_b)}"
 
     msg = f"""🔍 <b>15M Scan Cycle Complete</b>
-• <b>Pairs Checked:</b> {scanned_count} / {scanned_count}
-• <b>Top Radar:</b> {html.escape(top_str)}
-• <b>Action:</b> No qualifying trade (Capital Protected 🛡️)"""
+• <b>Pairs Checked:</b> {scanned_count} / {scanned_count}{pipeline_str}
+• <b>Top Radar:</b> {html.escape(top_str)}{bottleneck_str}
+• <b>Action:</b> Capital Protected 🛡️ (No reckless entries)"""
 
     return send_alert(msg, parse_mode="HTML")
 
@@ -118,9 +129,14 @@ def send_hourly_digest(
     equity: str,
     btc_summary: str = "Sideways",
     eth_summary: str = "Neutral",
-    top_watch: str = "None"
+    top_watch: str = "None",
+    scorecard_html: str = "",
+    bottlenecks_html: str = "",
 ) -> bool:
-    """Send Hourly Market & Bot Digest."""
+    """Send Hourly Market & Bot Digest with Strategy Scorecard & Bottlenecks."""
+    scorecard_section = f"\n\n{scorecard_html}" if scorecard_html else ""
+    bottlenecks_section = f"\n\n{bottlenecks_html}" if bottlenecks_html else ""
+
     msg = f"""⏱️ <b>HOURLY BOT STATUS & MARKET DIGEST</b>
 📅 <i>Hour: {html.escape(hour_utc)} UTC</i>
 
@@ -134,7 +150,7 @@ def send_hourly_digest(
 • BTC: {html.escape(btc_summary)}
 • ETH: {html.escape(eth_summary)}
 
-👀 <b>Top Watchlist:</b> {html.escape(top_watch)}
+👀 <b>Top Watchlist:</b> {html.escape(top_watch)}{scorecard_section}{bottlenecks_section}
 
 🟢 <i>System: Render Cloud LIVE | Health: 100%</i>"""
 
@@ -148,9 +164,12 @@ def send_daily_summary(
     pnl_usdt: str,
     pnl_pct: str,
     total_cycles: int,
-    signals_generated: int
+    signals_generated: int,
+    scorecard_html: str = "",
 ) -> bool:
-    """Send Daily 24H Summary Report."""
+    """Send Daily 24H Summary Report with Strategy Attribution."""
+    scorecard_section = f"\n\n{scorecard_html}" if scorecard_html else ""
+
     msg = f"""📅 <b>DAILY PERFORMANCE & SUMMARY REPORT</b>
 Date: {html.escape(date_str)} (UTC)
 
@@ -162,7 +181,7 @@ Date: {html.escape(date_str)} (UTC)
 🤖 <b>Bot Analytics:</b>
 • Total Scan Cycles: {total_cycles}
 • High Confluence Signals: {signals_generated}
-• Active Open Trades: 0
+• Active Open Trades: 0{scorecard_section}
 
 🛡️ <i>Risk Management: 100% Capital Protection Adhered</i>
 Have a great trading day ahead! ☕"""
