@@ -7,7 +7,7 @@ from typing import Dict, List, Any
 
 FRIENDLY_REASONS = {
     "WAIT_FOR_15M_CONFIRMATION": "15M Confirmation Pending",
-    "INSUFFICIENT_1H_TARGET_RR": "Target RR < 2.0",
+    "INSUFFICIENT_1H_TARGET_RR": "Target RR under 2.0",
     "BREAKOUT_POSSIBLE": "Range Breakout Risk",
     "NO_CLEAR_1H_TREND": "No Clear 1H Trend",
     "WAIT_FOR_15M_LIQUIDITY_SWEEP": "Liquidity Sweep Missing",

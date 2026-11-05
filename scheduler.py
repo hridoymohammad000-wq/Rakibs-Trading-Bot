@@ -1,7 +1,9 @@
 """Run the scanner after each 15M UTC candle close, plus Hourly and Daily Telegram Digests."""
 import argparse
-import sys
+import html
 import os
+import sys
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -25,6 +27,9 @@ from notifications.telegram import (
 )
 from pybit.unified_trading import HTTP
 from config.settings import API_KEY, API_SECRET, USE_TESTNET, USE_DEMO
+
+# Global scan lock to prevent concurrent scan execution between HTTP pings and timer loop
+SCAN_LOCK = threading.Lock()
 
 # Global session metrics
 _metrics = {
@@ -112,87 +117,95 @@ def check_macro_market():
     return res
 
 
-def scan_once(last_alert_key=None):
-    print("\n=== BYBIT DEMO SCANNER ===", flush=True)
-
-    # Sync live account balance from Bybit Demo
-    get_live_account_state()
-
-    result = scan_market(max_pairs=50)
-    watchdog.record_scan_success()
-
-    _metrics["hourly_scans"] += 1
-    _metrics["daily_scans"] += 1
-
-    print(
-        f"Scanned: {result['scanned_pairs']} | Failed: {result['failed_pairs']} | Candidates: {len(result['candidates'])}",
-        flush=True,
-    )
-
-    if result["failed_pairs"] > 0 and result["scanned_pairs"] == 0:
-        print("[BLOCK] Scanner errors detected", flush=True)
+def scan_once(last_alert_key=None, block: bool = False):
+    acquired = SCAN_LOCK.acquire(blocking=block)
+    if not acquired:
+        print("[CONCURRENCY] Market scan already running in another thread/request. Skipping duplicate execution.", flush=True)
         return last_alert_key
 
-    # Track highest score report for radar and analyze 5-8 bottlenecks
-    top_report = None
-    radar_analysis = None
-    if result.get("reports"):
-        top_report = max(result["reports"], key=lambda r: r.get("score", 0))
-        _metrics["last_top_radar"] = top_report
-        try:
-            radar_analysis = analyze_bottlenecks(result["reports"])
-            record_radar_snapshot(radar_analysis)
-            _metrics["last_radar_analysis"] = radar_analysis
-        except Exception as e:
-            logger.debug(f"Radar analysis error: {e}")
+    try:
+        print("\n=== BYBIT DEMO SCANNER ===", flush=True)
 
-    # If qualified candidates found:
-    signal_sent = False
-    if result.get("top_candidates"):
-        for candidate in result["top_candidates"]:
-            key = (
-                candidate["symbol"],
-                candidate["strategy"],
-                candidate["signal"],
-                candidate["candle_15m_closed_at_utc"],
-            )
+        # Sync live account balance from Bybit Demo
+        get_live_account_state()
 
-            if key == last_alert_key:
-                continue
+        result = scan_market(max_pairs=50)
+        watchdog.record_scan_success()
 
-            risk = check_trade_risk(candidate)
+        _metrics["hourly_scans"] += 1
+        _metrics["daily_scans"] += 1
 
-            if not risk["approved"]:
-                print(f"[BLOCK] {candidate['symbol']}: {risk['reason']}", flush=True)
-                continue
-
-            _metrics["current_equity"] = risk.get("equity_usdt", _metrics["current_equity"])
-            _metrics["slots_used"] = risk.get("slots_used", 0)
-
-            # Send rich 15M Signal Alert
-            send_signal_alert(candidate, risk)
-            strategy_tracker.record_signal(candidate.get("strategy", ""), candidate.get("symbol", ""))
-            _metrics["hourly_signals"] += 1
-            _metrics["daily_signals"] += 1
-            signal_sent = True
-            print(f"[ALERT SENT] {candidate['symbol']} {candidate['signal']}", flush=True)
-            return key
-
-    # If no signal qualified, send quiet 15M ping
-    if not signal_sent:
-        print("NO QUALIFIED SIGNAL -> Sending 15M Scan Ping", flush=True)
-        send_scan_ping(
-            scanned_count=result["scanned_pairs"],
-            top_radar=top_report,
-            radar_analysis=radar_analysis,
+        print(
+            f"Scanned: {result['scanned_pairs']} | Failed: {result['failed_pairs']} | Candidates: {len(result['candidates'])}",
+            flush=True,
         )
 
-    # Check hourly & daily digests seamlessly
-    now = datetime.now(timezone.utc)
-    check_and_send_hourly(now)
-    check_and_send_daily(now)
+        if result["failed_pairs"] > 0 and result["scanned_pairs"] == 0:
+            print("[BLOCK] Scanner errors detected", flush=True)
+            return last_alert_key
 
-    return last_alert_key
+        # Track highest score report for radar and analyze 5-8 bottlenecks
+        top_report = None
+        radar_analysis = None
+        if result.get("reports"):
+            top_report = max(result["reports"], key=lambda r: r.get("score", 0))
+            _metrics["last_top_radar"] = top_report
+            try:
+                radar_analysis = analyze_bottlenecks(result["reports"])
+                record_radar_snapshot(radar_analysis)
+                _metrics["last_radar_analysis"] = radar_analysis
+            except Exception as e:
+                logger.debug(f"Radar analysis error: {e}")
+
+        # If qualified candidates found:
+        signal_sent = False
+        if result.get("top_candidates"):
+            for candidate in result["top_candidates"]:
+                key = (
+                    candidate["symbol"],
+                    candidate["strategy"],
+                    candidate["signal"],
+                    candidate["candle_15m_closed_at_utc"],
+                )
+
+                if key == last_alert_key:
+                    continue
+
+                risk = check_trade_risk(candidate)
+
+                if not risk["approved"]:
+                    print(f"[BLOCK] {candidate['symbol']}: {risk['reason']}", flush=True)
+                    continue
+
+                _metrics["current_equity"] = risk.get("equity_usdt", _metrics["current_equity"])
+                _metrics["slots_used"] = risk.get("slots_used", 0)
+
+                # Send rich 15M Signal Alert
+                send_signal_alert(candidate, risk)
+                strategy_tracker.record_signal(candidate.get("strategy", ""), candidate.get("symbol", ""))
+                _metrics["hourly_signals"] += 1
+                _metrics["daily_signals"] += 1
+                signal_sent = True
+                print(f"[ALERT SENT] {candidate['symbol']} {candidate['signal']}", flush=True)
+                return key
+
+        # If no signal qualified, send quiet 15M ping
+        if not signal_sent:
+            print("NO QUALIFIED SIGNAL -> Sending 15M Scan Ping", flush=True)
+            send_scan_ping(
+                scanned_count=result["scanned_pairs"],
+                top_radar=top_report,
+                radar_analysis=radar_analysis,
+            )
+
+        # Check hourly & daily digests seamlessly
+        now = datetime.now(timezone.utc)
+        check_and_send_hourly(now)
+        check_and_send_daily(now)
+
+        return last_alert_key
+    finally:
+        SCAN_LOCK.release()
 
 
 def check_and_send_hourly(current_time: datetime = None, last_hourly_mark: datetime = None):
@@ -219,7 +232,7 @@ def check_and_send_hourly(current_time: datetime = None, last_hourly_mark: datet
             if ra.get("bottlenecks"):
                 b_lines = ["🚧 <b>Pipeline Bottlenecks (কোথায় আটকাচ্ছে):</b>"]
                 for b in ra["bottlenecks"][:3]:
-                    b_lines.append(f"• <b>{b['pct']}%</b> কয়েন: {b['label']}")
+                    b_lines.append(f"• <b>{b['pct']}%</b> কয়েন: {html.escape(str(b['label']))}")
                 bottlenecks_html = "\n".join(b_lines)
 
         send_hourly_digest(

@@ -11,19 +11,18 @@ ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
+from scheduler import SCAN_LOCK, scan_once, check_and_send_hourly, check_and_send_daily
+
 _last_scan_time = 0
-_scan_lock = threading.Lock()
 
 
 def run_full_scan_sync():
     """Run full scan while keeping HTTP connection active."""
     global _last_scan_time
-    with _scan_lock:
+    with SCAN_LOCK:
         print("[HTTP REQUEST] Running market scan cycle synchronously to keep container awake...", flush=True)
-        from scheduler import scan_once, check_and_send_hourly, check_and_send_daily
-        
         t0 = time.time()
-        scan_once()
+        scan_once(block=True)
         _last_scan_time = time.time()
         
         now = datetime.now(timezone.utc)
